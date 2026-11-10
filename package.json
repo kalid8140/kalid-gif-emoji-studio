@@ -1,13 +1,16 @@
 {
   "name": "kalid-gif-emoji-studio",
-  "version": "1.0.0",
-  "description": "KALID GIF Emoji Sticker Bot",
+  "version": "2.0.0",
+  "description": "KALID GIF, Emoji and Sticker Studio",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "axios": "^1.7.9",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "sharp": "^0.34.5",
+    "form-data": "^4.0.4",
+    "ffmpeg-static": "^5.2.0"
   }
 }
