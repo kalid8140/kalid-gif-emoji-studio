@@ -15,8 +15,15 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const PORT = process.env.PORT || 10000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
+const MAX_VIDEO_SIZE = 20 * 1024 * 1024;
+
 if (!TOKEN) {
   console.error("TELEGRAM_BOT_TOKEN is missing!");
+  process.exit(1);
+}
+
+if (!ffmpeg) {
+  console.error("FFmpeg is not available!");
   process.exit(1);
 }
 
@@ -26,26 +33,41 @@ const FILE_API = `https://api.telegram.org/file/bot${TOKEN}`;
 let BOT_USERNAME = "";
 const userModes = new Map();
 
+// TELEGRAM API
 async function telegram(method, data = {}) {
   const response = await axios.post(`${API}/${method}`, data);
   return response.data;
 }
 
+// SEND TEXT
 async function sendText(chatId, text, keyboard = null) {
   return telegram("sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
-    ...(keyboard ? {
-      reply_markup: { inline_keyboard: keyboard }
-    } : {})
+    ...(keyboard
+      ? {
+          reply_markup: {
+            inline_keyboard: keyboard
+          }
+        }
+      : {})
   });
 }
 
-async function sendFile(method, chatId, field, buffer, filename, contentType) {
+// SEND FILE
+async function sendFile(
+  method,
+  chatId,
+  field,
+  buffer,
+  filename,
+  contentType
+) {
   const form = new FormData();
 
   form.append("chat_id", String(chatId));
+
   form.append(field, buffer, {
     filename,
     contentType
@@ -54,25 +76,33 @@ async function sendFile(method, chatId, field, buffer, filename, contentType) {
   const response = await axios.post(
     `${API}/${method}`,
     form,
-    { headers: form.getHeaders(), maxBodyLength: Infinity }
+    {
+      headers: form.getHeaders(),
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
+    }
   );
 
   return response.data;
 }
 
+// DOWNLOAD TELEGRAM FILE
 async function downloadTelegramFile(fileId) {
   const result = await telegram("getFile", {
     file_id: fileId
   });
 
   const url = `${FILE_API}/${result.result.file_path}`;
+
   const response = await axios.get(url, {
-    responseType: "arraybuffer"
+    responseType: "arraybuffer",
+    maxContentLength: Infinity
   });
 
   return Buffer.from(response.data);
 }
 
+// PHOTO TO STICKER
 async function convertToSticker(buffer) {
   return sharp(buffer)
     .rotate()
@@ -84,6 +114,7 @@ async function convertToSticker(buffer) {
     .toBuffer();
 }
 
+// PHOTO TO EMOJI
 async function convertToEmoji(buffer) {
   return sharp(buffer)
     .rotate()
@@ -95,11 +126,14 @@ async function convertToEmoji(buffer) {
     .toBuffer();
 }
 
+// CREATE STICKER PACK
 async function createStickerPack(userId, stickerBuffer, type) {
   const isEmoji = type === "custom_emoji";
-  const fileName = "sticker.webp";
 
-  const safeUsername = BOT_USERNAME.replace(/[^a-zA-Z0-9_]/g, "");
+  const safeUsername = BOT_USERNAME.replace(
+    /[^a-zA-Z0-9_]/g,
+    ""
+  );
 
   const packName =
     `kalid_${userId}_${Date.now()}_by_${safeUsername}`;
@@ -113,18 +147,25 @@ async function createStickerPack(userId, stickerBuffer, type) {
   form.append("user_id", String(userId));
   form.append("name", packName);
   form.append("title", title);
-  form.append("sticker_type", isEmoji ? "custom_emoji" : "regular");
 
-  form.append("stickers", JSON.stringify([
-    {
-      sticker: "attach://sticker_file",
-      format: "static",
-      emoji_list: [isEmoji ? "😀" : "❤️"]
-    }
-  ]));
+  form.append(
+    "sticker_type",
+    isEmoji ? "custom_emoji" : "regular"
+  );
+
+  form.append(
+    "stickers",
+    JSON.stringify([
+      {
+        sticker: "attach://sticker_file",
+        format: "static",
+        emoji_list: [isEmoji ? "😀" : "❤️"]
+      }
+    ])
+  );
 
   form.append("sticker_file", stickerBuffer, {
-    filename: fileName,
+    filename: "sticker.webp",
     contentType: "image/webp"
   });
 
@@ -144,6 +185,7 @@ async function createStickerPack(userId, stickerBuffer, type) {
   return `https://t.me/addstickers/${packName}`;
 }
 
+// RUN FFMPEG
 function runFFmpeg(args) {
   return new Promise((resolve, reject) => {
     const process = spawn(ffmpeg, args);
@@ -160,15 +202,22 @@ function runFFmpeg(args) {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(errorOutput.slice(-1000)));
+        reject(
+          new Error(errorOutput.slice(-1500))
+        );
       }
     });
   });
 }
 
+// VIDEO TO HIGH QUALITY GIF
 async function createGIF(videoBuffer) {
-  const input = path.join(os.tmpdir(), `kalid-${Date.now()}.mp4`);
-  const output = path.join(os.tmpdir(), `kalid-${Date.now()}.gif`);
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "kalid-gif-")
+  );
+
+  const input = path.join(tempDir, "input.mp4");
+  const output = path.join(tempDir, "output.gif");
 
   try {
     fs.writeFileSync(input, videoBuffer);
@@ -176,22 +225,42 @@ async function createGIF(videoBuffer) {
     await runFFmpeg([
       "-y",
       "-i", input,
-      "-t", "8",
-      "-vf", "fps=12,scale=480:-1:flags=lanczos",
+      "-t", "15",
+      "-filter_complex",
+      "[0:v]fps=15,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a",
+      "-an",
       "-loop", "0",
       output
     ]);
 
-    return fs.readFileSync(output);
+    if (!fs.existsSync(output)) {
+      throw new Error("GIF output was not created.");
+    }
+
+    const gifBuffer = fs.readFileSync(output);
+
+    if (gifBuffer.length === 0) {
+      throw new Error("Created GIF is empty.");
+    }
+
+    return gifBuffer;
+
   } finally {
-    if (fs.existsSync(input)) fs.unlinkSync(input);
-    if (fs.existsSync(output)) fs.unlinkSync(output);
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true
+    });
   }
 }
 
+// VIDEO TO ANIMATED STICKER
 async function createAnimatedSticker(videoBuffer) {
-  const input = path.join(os.tmpdir(), `kalid-${Date.now()}.mp4`);
-  const output = path.join(os.tmpdir(), `kalid-${Date.now()}.webm`);
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "kalid-sticker-")
+  );
+
+  const input = path.join(tempDir, "input.mp4");
+  const output = path.join(tempDir, "output.webm");
 
   try {
     fs.writeFileSync(input, videoBuffer);
@@ -211,49 +280,70 @@ async function createAnimatedSticker(videoBuffer) {
     ]);
 
     return fs.readFileSync(output);
+
   } finally {
-    if (fs.existsSync(input)) fs.unlinkSync(input);
-    if (fs.existsSync(output)) fs.unlinkSync(output);
+    fs.rmSync(tempDir, {
+      recursive: true,
+      force: true
+    });
   }
 }
 
+// HOME PAGE
 app.get("/", (req, res) => {
   res.send("KALID GIF & EMOJI STUDIO IS LIVE! 🚀");
 });
 
+// HEALTH CHECK
 app.get("/healthz", (req, res) => {
   res.status(200).send("OK");
 });
 
+// TELEGRAM WEBHOOK
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
     const update = req.body;
 
-    // BUTTONS
+    // BUTTON CALLBACKS
     if (update.callback_query) {
       const query = update.callback_query;
-      const chatId = query.message.chat.id;
+      const chatId = query.message?.chat?.id;
       const action = query.data;
 
       await telegram("answerCallbackQuery", {
         callback_query_id: query.id
       });
 
+      if (!chatId) return;
+
       const options = {
-        emoji: "😀 Send me a photo to create your Emoji Pack.",
-        sticker: "🥰 Send me a photo to create a Sticker.",
-        gif: "🎬 Send me a video to convert it into a GIF.",
-        animated: "🔥 Send me a short video for an Animated Sticker.",
-        pack: "📦 Send me a photo to create your Sticker Pack.",
-        help: "❓ Use /start to see all available features."
+        emoji:
+          "😀 Send me a photo to create your Emoji Pack.",
+
+        sticker:
+          "🥰 Send me a photo to create a Sticker.",
+
+        gif:
+          "🎬 Send me a video to convert it into a GIF.",
+
+        animated:
+          "🔥 Send me a short video for an Animated Sticker.",
+
+        pack:
+          "📦 Send me a photo to create your Sticker Pack.",
+
+        help:
+          "❓ Use /start to see all available features."
       };
 
       if (options[action]) {
         userModes.set(chatId, action);
-        return sendText(chatId, options[action]);
+        return await sendText(chatId, options[action]);
       }
+
+      return;
     }
 
     // MESSAGES
@@ -266,33 +356,53 @@ app.post("/webhook", async (req, res) => {
 
     const command = text.split(" ")[0].split("@")[0];
 
+    // START
     if (command === "/start") {
       userModes.delete(chatId);
 
-      return sendText(
+      return await sendText(
         chatId,
         "🎨 <b>WELCOME TO KALID GIF & EMOJI STUDIO!</b>\n\n" +
         "Create amazing GIFs, Emojis and Stickers! ❤️\n\n" +
         "Choose what you want to create:",
         [
           [
-            { text: "😀 Emoji Maker", callback_data: "emoji" },
-            { text: "🎬 GIF Maker", callback_data: "gif" }
+            {
+              text: "😀 Emoji Maker",
+              callback_data: "emoji"
+            },
+            {
+              text: "🎬 GIF Maker",
+              callback_data: "gif"
+            }
           ],
           [
-            { text: "🥰 Sticker Maker", callback_data: "sticker" },
-            { text: "🔥 Animated Sticker", callback_data: "animated" }
+            {
+              text: "🥰 Sticker Maker",
+              callback_data: "sticker"
+            },
+            {
+              text: "🔥 Animated Sticker",
+              callback_data: "animated"
+            }
           ],
           [
-            { text: "📦 Sticker Pack", callback_data: "pack" }
+            {
+              text: "📦 Sticker Pack",
+              callback_data: "pack"
+            }
           ],
           [
-            { text: "❓ Help", callback_data: "help" }
+            {
+              text: "❓ Help",
+              callback_data: "help"
+            }
           ]
         ]
       );
     }
 
+    // COMMANDS
     const commands = {
       "/emoji": "emoji",
       "/gif": "gif",
@@ -306,18 +416,28 @@ app.post("/webhook", async (req, res) => {
       userModes.set(chatId, mode);
 
       const prompts = {
-        emoji: "😀 Send a photo to create your Custom Emoji Pack.",
-        gif: "🎬 Send a video to create a GIF.",
-        sticker: "🥰 Send a photo to create a Sticker.",
-        animated: "🔥 Send a short video for an Animated Sticker.",
-        pack: "📦 Send a photo to create a Sticker Pack."
+        emoji:
+          "😀 Send a photo to create your Custom Emoji Pack.",
+
+        gif:
+          "🎬 Send a video to create a high-quality GIF.",
+
+        sticker:
+          "🥰 Send a photo to create a Sticker.",
+
+        animated:
+          "🔥 Send a short video for an Animated Sticker.",
+
+        pack:
+          "📦 Send a photo to create your Sticker Pack."
       };
 
-      return sendText(chatId, prompts[mode]);
+      return await sendText(chatId, prompts[mode]);
     }
 
+    // HELP
     if (command === "/help") {
-      return sendText(
+      return await sendText(
         chatId,
         "❓ <b>KALID HELP CENTER</b>\n\n" +
         "/start - Main menu\n" +
@@ -333,17 +453,27 @@ app.post("/webhook", async (req, res) => {
 
     // PHOTO PROCESSING
     if (message.photo) {
-      if (!mode || !["emoji", "sticker", "pack"].includes(mode)) {
-        return sendText(
+      if (
+        !mode ||
+        !["emoji", "sticker", "pack"].includes(mode)
+      ) {
+        return await sendText(
           chatId,
           "Please choose Sticker, Emoji or Sticker Pack first using /start."
         );
       }
 
-      await sendText(chatId, "⏳ Processing your photo... ❤️");
+      await sendText(
+        chatId,
+        "⏳ Processing your photo... ❤️"
+      );
 
-      const photo = message.photo[message.photo.length - 1];
-      const original = await downloadTelegramFile(photo.file_id);
+      const photo =
+        message.photo[message.photo.length - 1];
+
+      const original = await downloadTelegramFile(
+        photo.file_id
+      );
 
       if (mode === "sticker") {
         const sticker = await convertToSticker(original);
@@ -359,11 +489,15 @@ app.post("/webhook", async (req, res) => {
 
         userModes.delete(chatId);
 
-        return sendText(chatId, "✅ Your sticker is ready! ❤️");
+        return await sendText(
+          chatId,
+          "✅ Your sticker is ready! ❤️"
+        );
       }
 
       if (mode === "emoji") {
         const emoji = await convertToEmoji(original);
+
         const link = await createStickerPack(
           userId,
           emoji,
@@ -372,7 +506,7 @@ app.post("/webhook", async (req, res) => {
 
         userModes.delete(chatId);
 
-        return sendText(
+        return await sendText(
           chatId,
           `🎉 Your Custom Emoji Pack is ready!\n\n${link}`
         );
@@ -380,6 +514,7 @@ app.post("/webhook", async (req, res) => {
 
       if (mode === "pack") {
         const sticker = await convertToSticker(original);
+
         const link = await createStickerPack(
           userId,
           sticker,
@@ -388,29 +523,55 @@ app.post("/webhook", async (req, res) => {
 
         userModes.delete(chatId);
 
-        return sendText(
+        return await sendText(
           chatId,
           `🎉 Your Sticker Pack is ready!\n\n${link}`
         );
       }
     }
 
-    // VIDEO PROCESSING
-    if (message.video || message.animation) {
+    // VIDEO OR ANIMATION OR VIDEO DOCUMENT
+    const videoFile =
+      message.video ||
+      message.animation ||
+      (
+        message.document &&
+        (
+          message.document.mime_type?.startsWith("video/") ||
+          /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(
+            message.document.file_name || ""
+          )
+        )
+          ? message.document
+          : null
+      );
+
+    if (videoFile) {
       if (!mode || !["gif", "animated"].includes(mode)) {
-        return sendText(
+        return await sendText(
           chatId,
           "Please choose GIF or Animated Sticker first using /start."
         );
       }
 
-      await sendText(chatId, "⏳ Processing your video... 🎬");
+      if (
+        videoFile.file_size &&
+        videoFile.file_size > MAX_VIDEO_SIZE
+      ) {
+        return await sendText(
+          chatId,
+          "❌ This video is larger than 20 MB. Please send a smaller video."
+        );
+      }
 
-      const videoId = message.video
-        ? message.video.file_id
-        : message.animation.file_id;
+      await sendText(
+        chatId,
+        "⏳ Processing your video... Please wait. 🎬"
+      );
 
-      const video = await downloadTelegramFile(videoId);
+      const video = await downloadTelegramFile(
+        videoFile.file_id
+      );
 
       if (mode === "gif") {
         const gif = await createGIF(video);
@@ -426,7 +587,10 @@ app.post("/webhook", async (req, res) => {
 
         userModes.delete(chatId);
 
-        return sendText(chatId, "🎉 Your GIF is ready! ❤️");
+        return await sendText(
+          chatId,
+          "🎉 Your high-quality GIF is ready! ❤️"
+        );
       }
 
       if (mode === "animated") {
@@ -443,7 +607,7 @@ app.post("/webhook", async (req, res) => {
 
         userModes.delete(chatId);
 
-        return sendText(
+        return await sendText(
           chatId,
           "🎉 Animated sticker created and sent!"
         );
@@ -451,7 +615,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (text) {
-      return sendText(
+      return await sendText(
         chatId,
         "👋 Please send /start to open the main menu."
       );
@@ -463,7 +627,9 @@ app.post("/webhook", async (req, res) => {
       error.response?.data || error.message
     );
 
-    const chatId = req.body?.message?.chat?.id;
+    const chatId =
+      req.body?.message?.chat?.id ||
+      req.body?.callback_query?.message?.chat?.id;
 
     if (chatId) {
       await sendText(
@@ -476,15 +642,21 @@ app.post("/webhook", async (req, res) => {
 
 // START SERVER
 app.listen(PORT, async () => {
-  console.log(`KALID GIF & EMOJI STUDIO running on port ${PORT}`);
+  console.log(
+    `KALID GIF & EMOJI STUDIO running on port ${PORT}`
+  );
 
   try {
     console.log("Checking Telegram bot token...");
 
     const bot = await telegram("getMe");
+
     BOT_USERNAME = bot.result.username;
 
-    console.log("TELEGRAM BOT CONNECTED:", BOT_USERNAME);
+    console.log(
+      "TELEGRAM BOT CONNECTED:",
+      BOT_USERNAME
+    );
 
     if (!BASE_URL) {
       throw new Error("RENDER_EXTERNAL_URL is missing!");
@@ -495,7 +667,10 @@ app.listen(PORT, async () => {
 
     const result = await telegram("setWebhook", {
       url: webhookURL,
-      allowed_updates: ["message", "callback_query"]
+      allowed_updates: [
+        "message",
+        "callback_query"
+      ]
     });
 
     console.log("WEBHOOK RESULT:", result);
