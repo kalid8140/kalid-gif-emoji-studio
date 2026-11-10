@@ -153,7 +153,10 @@ if (update.callback_query) {
   await axios.post(`${API}/answerCallbackQuery`, {
     callback_query_id: query.id
   }).catch(error => {
-    console.error("Callback error:", error.response?.data || error.message);
+    console.error(
+      "Callback error:",
+      error.response?.data || error.message
+    );
   });
 
   const messages = {
@@ -188,8 +191,13 @@ if (!baseURL) {
   throw new Error("RENDER_EXTERNAL_URL is missing!");
 }
 
-const webhookURL = `${baseURL}/webhook`;
+const webhookURL = `${baseURL.replace(/\/+$/, "")}/webhook`;
 
+// Check whether the Telegram bot token is valid.
+const botInfo = await axios.get(`${API}/getMe`);
+console.log("Telegram bot connected:", botInfo.data.result.username);
+
+// Register the webhook.
 const response = await axios.post(`${API}/setWebhook`, {
   url: webhookURL
 });
@@ -198,7 +206,7 @@ console.log("Webhook setup:", response.data);
 
 } catch (error) {
 console.error(
-"Webhook error:",
+"Webhook setup error:",
 error.response?.data || error.message
 );
 }
